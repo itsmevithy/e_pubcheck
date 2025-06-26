@@ -8,6 +8,7 @@ import asyncio
 import io
 import os
 import extraction as egz
+from pdf_viewer import create_pdf_viewer
 
 def get_base_path():
     """Get the base path for files, accounting for PyInstaller bundle"""
@@ -40,64 +41,6 @@ class LogSignalEmitter(QObject):
 # Global log signal emitter
 log_emitter = LogSignalEmitter()
 
-class PdfViewer(QMainWindow):
-    def __init__(self, pdf_path):
-        super().__init__()
-        self.setWindowTitle(f"PDF Viewer - {os.path.basename(pdf_path)}")
-        self.setGeometry(100, 100, 800, 600)
-
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-
-        # Add status label for debugging
-        self.status_label = QLabel("Loading PDF...")
-        layout.addWidget(self.status_label)
-
-        self.pdf_view = QPdfView()
-        layout.addWidget(self.pdf_view)
-
-        self.document = QPdfDocument(self)
-        self.pdf_view.setDocument(self.document)
-
-        # Connect status change signal for debugging
-        self.document.statusChanged.connect(self.on_status_changed)
-
-        # Load PDF file
-        if pdf_path and os.path.exists(pdf_path):
-            try:
-                print(f"Attempting to load PDF: {pdf_path}")
-                self.document.load(pdf_path)
-            except Exception as e:
-                self.status_label.setText(f"Error loading PDF: {str(e)}")
-                print(f"Error loading PDF: {e}")
-                QMessageBox.warning(self, "Error", f"Failed to load PDF: {str(e)}")
-        else:
-            self.status_label.setText("PDF file not found")
-            QMessageBox.warning(self, "Error", "PDF file not found or invalid path.")
-
-    def on_status_changed(self, status):
-        """Handle document status changes for debugging"""
-        
-        status_messages = {
-            QPdfDocument.Status.Null: "No document loaded",
-            QPdfDocument.Status.Loading: "Loading document...",
-            QPdfDocument.Status.Ready: "Document ready",
-            QPdfDocument.Status.Error: "Error loading document"
-        }
-        
-        message = status_messages.get(status, f"Unknown status: {status}")
-        self.status_label.setText(message)
-        print(f"PDF Document Status: {message}")
-        
-        if status == QPdfDocument.Status.Ready:
-            print(f"PDF loaded successfully. Page count: {self.document.pageCount()}")
-            self.status_label.hide()  # Hide status label when PDF is ready
-        elif status == QPdfDocument.Status.Error:
-            error_msg = f"PDF loading error"
-            print(error_msg)
-            QMessageBox.warning(self, "PDF Error", error_msg)
-
 class FileBrowser(QWidget):
     def __init__(self):
         super().__init__()
@@ -111,7 +54,7 @@ class FileBrowser(QWidget):
         self.model.setRootPath(QDir.rootPath())
         self.tree_view = QTreeView()
         self.tree_view.setModel(self.model)
-        self.tree_view.setRootIndex(self.model.index(QDir.currentPath()))
+        self.tree_view.setRootIndex(self.model.index(QDir.currentPath()+"/files"))
         layout.addWidget(self.tree_view)
 
         self.setLayout(layout)
@@ -126,7 +69,7 @@ class FileBrowser(QWidget):
         if os.path.isfile(path) and path.lower().endswith('.pdf'):
             try:
                 print(f"Opening PDF: {path}")
-                viewer = PdfViewer(path)
+                viewer = create_pdf_viewer(path)
                 viewer.show()
                 
                 # Keep reference to prevent garbage collection
@@ -663,7 +606,11 @@ class HomePage(QWidget):
         self.log_window = LogWindow()
         self.log_window.setVisible(False)
         
+        # Create main layout to hold the splitter
         main_layout = QHBoxLayout()
+        
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
@@ -673,7 +620,9 @@ class HomePage(QWidget):
         progress_layout = QVBoxLayout(self.progress_widget)
         progress_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        progress_label = QLabel("Initializing browser...")
+        
+        #dots = "." * (check_browser_ready.timeout_counter % 4)
+        progress_label = QLabel(f"Initializing web-driver...")
         progress_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #666;")
         progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -718,9 +667,16 @@ class HomePage(QWidget):
         controls_layout.addLayout(row_wrapper)
         controls_layout.addLayout(row_buttons)
         
-        main_layout.addWidget(controls_widget, 2)
-        main_layout.addWidget(self.file_browser, 1)
-        main_layout.addWidget(self.log_window, 1)
+        # Add widgets to splitter
+        splitter.addWidget(controls_widget)
+        splitter.addWidget(self.file_browser)
+        splitter.addWidget(self.log_window)
+        
+        # Set splitter proportions (controls get more space)
+        splitter.setSizes([800, 300, 300])
+        
+        # Add splitter to main layout
+        main_layout.addWidget(splitter)
         
         self.setLayout(main_layout)
     
@@ -855,7 +811,7 @@ if __name__ == "__main__":
         window = HomePage([], [], Keywords=[])
         window.start_button.setEnabled(False)
         window.file_tog.setEnabled(False)
-        window.setWindowTitle("DICV Monitor - Initializing...")
+        window.setWindowTitle("E-PubChecker - Initializing...")
         window.show()
         
         def check_browser_ready():
@@ -878,12 +834,11 @@ if __name__ == "__main__":
                 window.progress_widget.setVisible(False)
                 window.start_button.setVisible(False)
                 window.file_tog.setVisible(False)
-                window.setWindowTitle("DICV Monitor")
-                window.start_button.setEnabled(True)
-                window.file_tog.setEnabled(True)
+                window.log_tog.setVisible(False)
+                window.setWindowTitle("E-PubChecker")
                 QMessageBox.warning(window, "Browser Initialization", 
                                   "Browser initialization timed out. Kindly close the application and try again.")
-                return
+                app.quit()
                 
             if egz.browser_ready.is_set():
                 print("Browser initialization completed!")
@@ -902,7 +857,7 @@ if __name__ == "__main__":
                         default_keywords = [i for i in egz.kwList] if hasattr(egz, 'kwList') else []
                         
                         new_window = HomePage(default_domains, ministries_list, Keywords=default_keywords)
-                        new_window.setWindowTitle("DICV Monitor")
+                        new_window.setWindowTitle("E-PubChecker")
                         new_window.show()
                         window.close()
                         window = new_window
@@ -910,29 +865,29 @@ if __name__ == "__main__":
                         print("WARNING: Insufficient ministries found! Using defaults.")
                         # Switch from progress widget to sections
                         window.progress_widget.setVisible(False)
-                        window.section1.setVisible(True)
-                        window.section2.setVisible(True)
-                        window.setWindowTitle("DICV Monitor")
-                        window.start_button.setEnabled(True)
-                        window.file_tog.setEnabled(True)
+                        window.start_button.setVisible(False)
+                        window.file_tog.setVisible(False)
+                        window.log_tog.setVisible(False)
+                        window.setWindowTitle("E-PubChecker")
                         QMessageBox.warning(window, "Browser Initialization", 
-                                          "Browser initialized but ministry data is incomplete. Using defaults.")
+                                          "Browser initialized but ministry data is incomplete. Kindly close the application and try again.")
+                        app.quit()
                         
                 except Exception as e:
                     print(f"Error updating window: {e}")
                     # Switch from progress widget to sections even on error
                     window.progress_widget.setVisible(False)
-                    window.section1.setVisible(True)
-                    window.section2.setVisible(True)
-                    window.setWindowTitle("DICV Monitor")
-                    window.start_button.setEnabled(True)
-                    window.file_tog.setEnabled(True)
+                    window.start_button.setVisible(False)
+                    window.file_tog.setVisible(False)
+                    window.log_tog.setVisible(False)
+                    window.setWindowTitle("E-PubChecker")
                     QMessageBox.warning(window, "Browser Initialization", 
-                                      f"Error loading browser data: {e}\nUsing defaults.")
+                                      f"Error loading browser data: {e}\nKindly close the application and try again..")
+                    app.quit()
             else:
                 dots = "." * (check_browser_ready.timeout_counter % 4)
-                progress_text = f"Initializing browser{dots} ({check_browser_ready.timeout_counter}s)"
-                window.setWindowTitle(f"DICV Monitor - {progress_text}")
+                progress_text = f"Initializing web-driver{dots} ({check_browser_ready.timeout_counter}s)"
+                window.setWindowTitle(f"E-PubChecker - {progress_text}")
         
         check_browser_ready.initialized = False
         check_browser_ready.timeout_counter = 0
