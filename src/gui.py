@@ -1,36 +1,142 @@
 from threading import Thread
 from PySide6.QtWidgets import *
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QDir, QUrl
+from PySide6.QtPdfWidgets import QPdfView
+from PySide6.QtPdf import QPdfDocument
 import sys
 import asyncio
-import extraction as egz
 import io
 import os
+import extraction as egz
+
+def get_base_path():
+    """Get the base path for files, accounting for PyInstaller bundle"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
 
 ministries_list = []
 user_domains = []
 user_keywords = []
 
-# Custom stream to capture print statements
 class LogStream(io.StringIO):
     def __init__(self, log_signal):
         super().__init__()
         self.log_signal = log_signal
     
     def write(self, text):
-        if text.strip():  # Only emit non-empty messages
+        if text.strip():
             self.log_signal.emit(text.strip())
         return len(text)
     
     def flush(self):
         pass
 
-# Signal emitter for thread-safe logging
 class LogSignalEmitter(QObject):
     log_message = Signal(str)
+    progress_update = Signal(str, str, str)
 
 # Global log signal emitter
 log_emitter = LogSignalEmitter()
+
+class PdfViewer(QMainWindow):
+    def __init__(self, pdf_path):
+        super().__init__()
+        self.setWindowTitle(f"PDF Viewer - {os.path.basename(pdf_path)}")
+        self.setGeometry(100, 100, 800, 600)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+
+        # Add status label for debugging
+        self.status_label = QLabel("Loading PDF...")
+        layout.addWidget(self.status_label)
+
+        self.pdf_view = QPdfView()
+        layout.addWidget(self.pdf_view)
+
+        self.document = QPdfDocument(self)
+        self.pdf_view.setDocument(self.document)
+
+        # Connect status change signal for debugging
+        self.document.statusChanged.connect(self.on_status_changed)
+
+        # Load PDF file
+        if pdf_path and os.path.exists(pdf_path):
+            try:
+                print(f"Attempting to load PDF: {pdf_path}")
+                self.document.load(pdf_path)
+            except Exception as e:
+                self.status_label.setText(f"Error loading PDF: {str(e)}")
+                print(f"Error loading PDF: {e}")
+                QMessageBox.warning(self, "Error", f"Failed to load PDF: {str(e)}")
+        else:
+            self.status_label.setText("PDF file not found")
+            QMessageBox.warning(self, "Error", "PDF file not found or invalid path.")
+
+    def on_status_changed(self, status):
+        """Handle document status changes for debugging"""
+        
+        status_messages = {
+            QPdfDocument.Status.Null: "No document loaded",
+            QPdfDocument.Status.Loading: "Loading document...",
+            QPdfDocument.Status.Ready: "Document ready",
+            QPdfDocument.Status.Error: "Error loading document"
+        }
+        
+        message = status_messages.get(status, f"Unknown status: {status}")
+        self.status_label.setText(message)
+        print(f"PDF Document Status: {message}")
+        
+        if status == QPdfDocument.Status.Ready:
+            print(f"PDF loaded successfully. Page count: {self.document.pageCount()}")
+            self.status_label.hide()  # Hide status label when PDF is ready
+        elif status == QPdfDocument.Status.Error:
+            error_msg = f"PDF loading error"
+            print(error_msg)
+            QMessageBox.warning(self, "PDF Error", error_msg)
+
+class FileBrowser(QWidget):
+    def __init__(self):
+        super().__init__()
+        
+        layout = QVBoxLayout()
+        self.path_Edit = QLineEdit()
+        self.path_Edit.setPlaceholderText("Enter file path or URL")
+        layout.addWidget(self.path_Edit)
+
+        self.model = QFileSystemModel()
+        self.model.setRootPath(QDir.rootPath())
+        self.tree_view = QTreeView()
+        self.tree_view.setModel(self.model)
+        self.tree_view.setRootIndex(self.model.index(QDir.currentPath()))
+        layout.addWidget(self.tree_view)
+
+        self.setLayout(layout)
+
+        # Connect signals (e.g., tree_view selection changed, button clicks)
+        self.tree_view.clicked.connect(self.update_path_bar)
+
+    def update_path_bar(self, index):
+        path = self.model.filePath(index)
+        self.path_Edit.setText(path)
+        
+        if os.path.isfile(path) and path.lower().endswith('.pdf'):
+            try:
+                print(f"Opening PDF: {path}")
+                viewer = PdfViewer(path)
+                viewer.show()
+                
+                # Keep reference to prevent garbage collection
+                if not hasattr(self, 'pdf_viewers'):
+                    self.pdf_viewers = []
+                self.pdf_viewers.append(viewer)
+                
+            except Exception as e:
+                print(f"Error opening PDF viewer: {e}")
+                QMessageBox.warning(self, "Error", f"Could not open PDF: {str(e)}")
 
 class LogWindow(QWidget):
     def __init__(self):
@@ -79,11 +185,12 @@ class LogWindow(QWidget):
         layout.addWidget(clear_btn)
         self.setLayout(layout)
         
-        # Connect to log signal
         from datetime import datetime
         self.today = datetime.now()
         log_emitter.log_message.connect(self.add_log_message)
-        self.file_path = f"../files/logs/log{self.today.strftime('%Y%m%d')}.txt"
+        
+        base_path = get_base_path()
+        self.file_path = os.path.join(base_path, "files", "logs", f"log{self.today.strftime('%Y%m%d')}.txt")
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
         self.log_f = open(self.file_path, "a+")
         
@@ -95,11 +202,9 @@ class LogWindow(QWidget):
         self.log_display.append(formatted_message)
         self.log_f.write(formatted_message + "\n")
         
-        # Auto-scroll to bottom
         scrollbar = self.log_display.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         
-        # Limit log entries to prevent memory issues (keep last 1000 lines)
         if self.log_display.document().blockCount() > 1000:
             cursor = self.log_display.textCursor()
             cursor.movePosition(cursor.MoveOperation.Start)
@@ -117,29 +222,43 @@ class DomainEntries(QScrollArea):
         self.content = QWidget()
         self.layout = QVBoxLayout(self.content)
         self.layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.items_list = items.copy()  # Keep track of items
+        self.items_list = items.copy()
+        self.item_widgets = {}
         self._refresh_display()
         self.content.setLayout(self.layout)
         self.setWidget(self.content)
-    
+        
+        self.blink_timer = QTimer(self)
+        self.blink_timer.setInterval(500)
+        self.blink_timer.timeout.connect(self._handle_blink)
+        self.blinking_item = None
+        self.blink_state = False
+
     def _create_item_row(self, item_text):
         """Create a row with item text and delete button"""
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 2, 0, 2)
+        row_widget.setStyleSheet("""
+            QWidget:hover {
+                background-color: #2a5dd5;                     
+            }
+        """)
         
-        # Item label
         label = QLabel(item_text)
         label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        label.setStyleSheet("padding: 5px;")
+
+        indicator = QLabel()
+        indicator.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        indicator.setFixedSize(50, 25)
+        indicator.setStyleSheet("padding: 5px; background-color: transparent; border-radius: 12px;")
         
-        # Delete button
-        delete_btn = QPushButton("✕")
+        delete_btn = QPushButton()
+        delete_btn.setIcon(QApplication.instance().style().standardIcon(QStyle.SP_TrashIcon))
         delete_btn.setFixedSize(25, 25)
         delete_btn.setStyleSheet("""
             QPushButton {
-                background-color: #ff4444;
-                color: white;
+                background-color: #969696;
                 border: none;
                 border-radius: 12px;
                 font-weight: bold;
@@ -151,30 +270,88 @@ class DomainEntries(QScrollArea):
         delete_btn.clicked.connect(lambda: self._delete_item(item_text))
         
         row_layout.addWidget(label)
+        row_layout.addWidget(indicator)
         row_layout.addWidget(delete_btn)
-        row_layout.setStretch(0, 1)  # Label takes most space
+        row_layout.setStretch(0, 1)
         
+        self.item_widgets[item_text] = {
+            'widget': row_widget,
+            'label': indicator
+        }        
         return row_widget
+    
+    def _handle_blink(self):
+        """Handle the blinking timer timeout"""
+        if self.blinking_item and self.blinking_item in self.item_widgets:
+            self.blink_state = not self.blink_state
+            color = '#ffeb3b' if self.blink_state else 'transparent'
+            label = self.item_widgets[self.blinking_item]['label']
+            label.setStyleSheet(f"padding: 5px; background-color: {color}; border-radius: 3px;")
+    
+    def update_item_color(self, item_text, status, count="-"):
+        """Update the color of a specific item based on status"""
+        if item_text not in self.item_widgets:
+            return
+            
+        colors = {
+            'default': 'transparent',
+            'extracting': '#ffeb3b',
+            'completed': '#4caf50',
+            'error': '#f44336',
+            'skipped': "#2a5dd5",
+        }
+        
+        if status == 'extracting':
+            if self.blink_timer.isActive():
+                self.blink_timer.stop()
+                self.blink_state = True
+                self._handle_blink()
+            
+            self.blinking_item = item_text
+            self.blink_state = True
+            self.blink_timer.start()
+            return
+        else:
+            if self.blinking_item == item_text:
+                self.blink_timer.stop()
+                self.blinking_item = None
+                self.blink_state = False
+                
+        color = colors.get(status, colors['default'])
+        label = self.item_widgets[item_text]['label']
+        label.setStyleSheet(f"padding: 5px; background-color: {color}; border-radius: 3px;")
+        label.setText(count)
+    
+    def reset_all_colors(self):
+        """Reset all items to default color and stop any blinking"""
+        if hasattr(self, 'blink_timer') and self.blink_timer.isActive():
+            self.blink_timer.stop()
+        self.blinking_item = None
+        self.blink_state = False
+        
+        for item_text in self.item_widgets:
+            self.update_item_color(item_text, 'default')
     
     def _delete_item(self, item_text):
         """Remove item from list and refresh display"""
         if item_text in self.items_list:
             self.items_list.remove(item_text)
+            if item_text in self.item_widgets:
+                del self.item_widgets[item_text]
             self._refresh_display()
     
     def _refresh_display(self):
         """Clear and rebuild the display"""
-        # Clear existing widgets
         for i in reversed(range(self.layout.count())):
             child = self.layout.itemAt(i).widget()
             if child:
                 child.deleteLater()
         
-        # Add items with delete buttons
+        self.item_widgets.clear()
+        
         for item in self.items_list:
             row_widget = self._create_item_row(item)
             self.layout.addWidget(row_widget)
-        
     
     def get_items(self):
         """Return current list of items"""
@@ -193,6 +370,12 @@ class DomainEntries(QScrollArea):
         """Update the entire list with new items"""
         self.items_list = items.copy()
         self._refresh_display()
+    
+    def cleanup(self):
+        """Clean up timers and resources"""
+        if hasattr(self, 'blink_timer') and self.blink_timer.isActive():
+            self.blink_timer.stop()
+        self.blinking_item = None
 
 class KeywordEntries(QScrollArea):
     def __init__(self, items, parent=None):
@@ -201,7 +384,6 @@ class KeywordEntries(QScrollArea):
         self.content = QWidget()
         self.layout = QVBoxLayout(self.content)
         self.layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        # Store items as [text, boolean] pairs
         self.items_list = items
         self._refresh_display()
         self.content.setLayout(self.layout)
@@ -213,25 +395,27 @@ class KeywordEntries(QScrollArea):
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 2, 0, 2)
+        row_widget.setStyleSheet("""
+            QWidget:hover {
+                background-color: #2a5dd5;
+            }
+        """)
         
-        # Checkbox
         checkbox = QCheckBox()
         checkbox.setChecked(is_checked)
         checkbox.setFixedSize(20, 20)
         checkbox.toggled.connect(lambda checked: self._toggle_item(item_text, checked))
         
-        # Item label
         label = QLabel(item_text)
         label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         label.setStyleSheet("padding: 5px;")
         
-        # Delete button
-        delete_btn = QPushButton("✕")
+        delete_btn = QPushButton()
+        delete_btn.setIcon(QApplication.instance().style().standardIcon(QStyle.SP_TrashIcon))
         delete_btn.setFixedSize(25, 25)
         delete_btn.setStyleSheet("""
             QPushButton {
-                background-color: #ff4444;
-                color: white;
+                background-color: #969696;
                 border: none;
                 border-radius: 12px;
                 font-weight: bold;
@@ -245,7 +429,7 @@ class KeywordEntries(QScrollArea):
         row_layout.addWidget(checkbox)
         row_layout.addWidget(label)
         row_layout.addWidget(delete_btn)
-        row_layout.setStretch(1, 1)  # Label takes most space
+        row_layout.setStretch(1, 1)
         
         return row_widget
     
@@ -263,13 +447,11 @@ class KeywordEntries(QScrollArea):
     
     def _refresh_display(self):
         """Clear and rebuild the display"""
-        # Clear existing widgets
         for i in reversed(range(self.layout.count())):
             child = self.layout.itemAt(i).widget()
             if child:
                 child.deleteLater()
         
-        # Add items with checkboxes and delete buttons
         for item_data in self.items_list:
             row_widget = self._create_item_row(item_data)
             self.layout.addWidget(row_widget)
@@ -288,7 +470,7 @@ class KeywordEntries(QScrollArea):
         return False
     
     def refresh(self, items):
-        """Update the entire list with new items (as simple strings, defaulting to unchecked)"""
+        """Update the entire list with new items"""
         self.items_list = [[item, False] for item in items] if items else []
         self._refresh_display()
 
@@ -338,35 +520,30 @@ class ColumnSection(QWidget):
 
 def start_action():
     """Handle start/cancel button clicks"""
-    
-    # Check if we're in cancel mode
     if window.start_button.text() == "Cancel":
         print("Extraction cancelled by user")
-        egz.eve_sig.clear()  # Clear extraction signal
-        # Stop any running timers (if they exist)
+        egz.eve_sig.clear()
         if hasattr(window, '_status_timer') and window._status_timer.isActive():
             window._status_timer.stop()
         if hasattr(window, '_progress_popup') and window._progress_popup.isVisible():
             window._progress_popup.close()
         
-        window.start_button.setText("Start")  # Reset button text
+        window.section1.frame.reset_all_colors()
+        window.start_button.setText("Start")
         window.start_button.setEnabled(True)
-        return  # ✅ Exit early for cancel
-    
-    # Start extraction process
+        return
+        
+    egz.eve_sig.set()
     window.start_button.setText("Cancel")
     print("Start button clicked - setting extraction signal")
     
-    # Create progress popup
     progress_popup = QMessageBox(window)
     progress_popup.setText("Extraction in progress, please wait...")
     progress_popup.setStandardButtons(QMessageBox.StandardButton.Cancel)
     progress_popup.show()
     
-    # Store references for cleanup
     window._progress_popup = progress_popup
     
-    # Handle Cancel button click on popup
     def handle_popup_cancel():
         if progress_popup.clickedButton() == progress_popup.button(QMessageBox.StandardButton.Cancel):
             print("User cancelled extraction via popup")
@@ -374,41 +551,38 @@ def start_action():
             if hasattr(window, '_status_timer'):
                 window._status_timer.stop()
             progress_popup.close()
+            window.section1.frame.reset_all_colors()
             window.start_button.setText("Start")
             window.start_button.setEnabled(True)
     
     progress_popup.buttonClicked.connect(handle_popup_cancel)
     
-    # Set extraction signal
     egz.eve_sig.set()
     egz.timeout_event.clear()
     egz.empty_domains.clear()
     
+    window.section1.frame.reset_all_colors()
+    
     print("Extraction signal set, starting extraction...")
     
-    # Create timer to check extraction status non-blocking
     status_timer = QTimer(window)
     status_timer.timeout.connect(lambda: check_extraction_status(progress_popup, status_timer))
-    status_timer.start(100)  # Check every 100ms
+    status_timer.start(100)
     
-    # Store timer reference for cleanup
     window._status_timer = status_timer
 
 def check_extraction_status(progress_popup, status_timer):
     """Non-blocking status checker for extraction progress"""
     
-    # Helper function to cleanup timers and close progress popup
     def cleanup_and_close():
         status_timer.stop()
         if progress_popup and progress_popup.isVisible():
             progress_popup.close()
-        # Clean up stored references
         if hasattr(window, '_status_timer'):
             delattr(window, '_status_timer')
         if hasattr(window, '_progress_popup'):
             delattr(window, '_progress_popup')
     
-    # Check for timeout
     if egz.timeout_event.is_set():
         cleanup_and_close()
         
@@ -418,13 +592,11 @@ def check_extraction_status(progress_popup, status_timer):
         print("Timeout occurred during extraction!")
         error_popup.show()
         
-        # Auto-close error popup after 3 seconds
         auto_close_timer = QTimer(window)
         auto_close_timer.timeout.connect(lambda: close_popup_and_enable(error_popup, auto_close_timer))
         auto_close_timer.start(3000)
         return
     
-    # Check for empty domains
     if egz.empty_domains.is_set():
         cleanup_and_close()
         egz.empty_domains.clear()
@@ -435,23 +607,22 @@ def check_extraction_status(progress_popup, status_timer):
         print("No domains selected during extraction!")
         error_popup.show()
         
-        # Auto-close error popup after 3 seconds
         auto_close_timer = QTimer(window)
         auto_close_timer.timeout.connect(lambda: close_popup_and_enable(error_popup, auto_close_timer))
         auto_close_timer.start(3000)
         return
-    
-    # Check if extraction is complete
+        
     if not egz.eve_sig.is_set():
         cleanup_and_close()
         
         success_popup = QMessageBox(window)
-        success_popup.setText(f"Extraction completed!\nTotal {egz.dwnld_count} files downloaded.\nFiles saved in ../files/ directory")
+        base_path = get_base_path()
+        files_path = os.path.join(base_path, "files")
+        success_popup.setText(f"Extraction completed!\nTotal {egz.dwnld_count} files downloaded.\nFiles saved in {files_path} directory")
         success_popup.setStandardButtons(QMessageBox.StandardButton.Ok)
         print("Extraction completed!")
         success_popup.show()
         
-        # Auto-close success popup after 5 seconds
         auto_close_timer = QTimer(window)
         auto_close_timer.timeout.connect(lambda: close_popup_and_enable(success_popup, auto_close_timer))
         auto_close_timer.start(5000)
@@ -460,20 +631,23 @@ def close_popup_and_enable(popup, timer):
     """Helper function to close popup and re-enable start button"""
     timer.stop()
     popup.close()
-    window.start_button.setText("Start")  # Reset button text
+    window.start_button.setText("Start")
     window.start_button.setEnabled(True)
 class HomePage(QWidget):
     def log_toggle(self):
         text = ["Show Logs", "Hide Logs"]
         self.log_tog.setText(text[self.log_tog.isChecked()])
         self.log_window.setVisible(self.log_tog.isChecked())
-
+    def file_toggle(self):
+        text = ["View files", "Close browser"]
+        self.file_tog.setText(text[self.file_tog.isChecked()])
+        self.file_browser.setVisible(self.file_tog.isChecked())
+    
     def __init__(self, Domains, Ministries, Keywords):
         super().__init__()
         self.setWindowTitle("Homepage")
-        self.setGeometry(100, 100, 1400, 600)  # Increased width for log window
+        self.setGeometry(100, 100, 1400, 600)
         
-        # Create two column sections side by side
         global ministries_list
         ministries_list = Ministries
         self.section1 = ColumnSection("Domains", items=Ministries, frame_items=Domains)
@@ -481,47 +655,85 @@ class HomePage(QWidget):
         self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(start_action)
         
-        # Create log window
-        self.log_window = LogWindow()
-        self.log_window.setVisible(False)  # Initially hidden
+        log_emitter.progress_update.connect(self.update_domain_color)
         
-        # Main layout - horizontal split between controls and logs
+        self.file_browser = FileBrowser()
+        self.file_browser.setVisible(False)
+
+        self.log_window = LogWindow()
+        self.log_window.setVisible(False)
+        
         main_layout = QHBoxLayout()
         
-        # Left side - controls
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
         
-        # Row for domains and keywords
+        # Create progress widget to replace sections during initialization
+        self.progress_widget = QWidget()
+        progress_layout = QVBoxLayout(self.progress_widget)
+        progress_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        progress_label = QLabel("Initializing browser...")
+        progress_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #666;")
+        progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+        self.progress_bar.setFixedWidth(300)
+        
+        progress_layout.addWidget(progress_label)
+        progress_layout.addWidget(self.progress_bar)
+        
         row_wrapper = QHBoxLayout()
+        
+        # Always add both to layout but control visibility
         row_wrapper.addWidget(self.section1)
         row_wrapper.addWidget(self.section2)
+        row_wrapper.addWidget(self.progress_widget)
         
+        if not egz.browser_ready.is_set():
+            # Show progress widget instead of sections
+            self.section1.setVisible(False)
+            self.section2.setVisible(False)
+            self.progress_widget.setVisible(True)
+        else:
+            # Show normal sections
+            self.section1.setVisible(True)
+            self.section2.setVisible(True)
+            self.progress_widget.setVisible(False)
+        
+        self.file_tog = QPushButton("View files")
+        self.file_tog.setCheckable(True)
+        self.file_tog.clicked.connect(self.file_toggle)
+
         self.log_tog = QPushButton("Show Logs")
         self.log_tog.setCheckable(True)
         self.log_tog.clicked.connect(self.log_toggle)
         
         row_buttons = QHBoxLayout()
         row_buttons.addWidget(self.start_button)
+        row_buttons.addWidget(self.file_tog)
         row_buttons.addWidget(self.log_tog)
 
         controls_layout.addLayout(row_wrapper)
         controls_layout.addLayout(row_buttons)
         
-        # Add controls and log window to main layout
-        main_layout.addWidget(controls_widget, 2)  # Controls take 2/3 of space
-        main_layout.addWidget(self.log_window, 1)   # Log window takes 1/3 of space
+        main_layout.addWidget(controls_widget, 2)
+        main_layout.addWidget(self.file_browser, 1)
+        main_layout.addWidget(self.log_window, 1)
         
         self.setLayout(main_layout)
+    
+    def update_domain_color(self, ministry_name, status, count):
+        """Update the color of a domain entry based on extraction progress"""
+        self.section1.frame.update_item_color(ministry_name, status, count)
     def closeEvent(self, event):
         """Handle window close event to ensure proper cleanup"""
         print("Closing application...")
         self.log_window.log_f.close()
 
 
-if __name__ == "__main__": # Signal when browser is initialized
-    
-    # Set up print capture for real-time logging
+if __name__ == "__main__":
     log_stream = LogStream(log_emitter.log_message)
     
     def setup_logging():
@@ -534,121 +746,202 @@ if __name__ == "__main__": # Signal when browser is initialized
     
     async def extraction_worker():
         """Background thread that handles browser and extraction"""
-        try:
-            page = await egz.egz_extract_defaults()
-            while True:
-                if egz.eve_sig.is_set():
-                    print("Processing extraction request...")
-                    try:
-                        # Get domain names and convert to codes
-                        domain_names = window.section1.frame.get_items()
-                        keyword_data = window.section2.frame.get_items()  # Returns [[text, boolean], ...]
-                        
-                        # Convert domain_names to domain_codes
-                        domain_codes = []
-                        for domain_name in domain_names:
-                            for code, name in egz.valdict.items():
-                                if name == domain_name:
-                                    domain_codes.append(code)
-                                    break
-                        
-                        # keyword_data is already in the format [[text, boolean], ...]
-                        keywords = keyword_data
-                        
-                        print(f"Domain codes: {domain_codes}")
-                        print(f"Keywords: {keywords}")
-                        #if domain_codes and keywords:
-                        #    print("Starting extraction...")
-                        if(await egz.extract_mids(page, domain_names, keyword_data) < 0):
-                            continue
-                        
-                        # Check if extraction was cancelled before proceeding
-                        if not egz.eve_sig.is_set():
-                            print("Extraction was cancelled, stopping...")
-                            break
-                            
-                        print("Extraction completed successfully!\nNow downloading files...")
-                        egz.egz_download()
-                        egz.ais_download()
-                            
-                        egz.eve_sig.clear()  # Clear signal after extraction
-                        '''
-                        elif not domain_codes:
-                            popup = QMessageBox()
-                            popup.setText("No domains selected! Please select at least one domain.")
-                            popup.exec()
-                        else:
-                            print("No domains or keywords selected!")
-                         '''   
-                    except Exception as e:
-                        print(f"Error during extraction: {e}")
-                    finally:
-                        egz.eve_sig.clear()
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                print(f"Starting browser initialization (egz)... Attempt {retry_count + 1}/{max_retries}")
+                egz.browser_ready.clear()
+                res = await egz.egz_extract_defaults()
                 
-                await asyncio.sleep(1)  # Check every second        
-        except KeyboardInterrupt:
-            print("Extraction worker interrupted by user")
+                if res < 0:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print("Maximum retry attempts reached. Browser initialization failed.")
+                        egz.browser_ready.set()
+                        return
+                    print(f"Browser initialization failed, retrying in 2 seconds... ({retry_count}/{max_retries})")
+                    await asyncio.sleep(2)
+                    continue
+                
+                print("Browser initialization successful!")
+                break
+                
+            except Exception as e:
+                retry_count += 1
+                print(f"Browser initialization error (gui): {e}")
+                if retry_count >= max_retries:
+                    print("Maximum retry attempts reached. Browser initialization failed.")
+                    egz.browser_ready.set()
+                    return
+                print(f"Retrying browser initialization in 2 seconds... ({retry_count}/{max_retries})")
+                await asyncio.sleep(2)
+                continue
+        
+        if retry_count < max_retries:
+            try:
+                while True:
+                    if egz.eve_sig.is_set():
+                        print("Processing extraction request...")
+                        try:
+                            domain_names = window.section1.frame.get_items()
+                            keyword_data = window.section2.frame.get_items()
+                            
+                            domain_codes = []
+                            for domain_name in domain_names:
+                                for code, name in egz.valdict.items():
+                                    if name == domain_name:
+                                        domain_codes.append(code)
+                                        break
+                            
+                            keywords = keyword_data
+                            
+                            print(f"Domain codes: {domain_codes}")
+                            print(f"Keywords: {keywords}")
+                            
+                            if(await egz.extract_mids(domain_names, keyword_data) < 0):
+                                continue
+                            
+                            print(f"Returned back from extract_mids, starting download...\nValue of eve_sig: {egz.eve_sig.is_set()}")
+                            
+                            if not egz.eve_sig.is_set():
+                                print("Extraction was cancelled, stopping...")
+                                continue
+                                
+                            print("Extraction completed successfully!\nNow downloading files...")
+                            window.section1.frame.cleanup()
+                            egz.egz_download()
+                               
+                        except Exception as e:
+                            print(f"Error during extraction: {e}")
+                        finally:
+                            egz.eve_sig.clear()
+                    
+                    await asyncio.sleep(1)
+            except KeyboardInterrupt:
+                print("Extraction worker interrupted by user")
+            except Exception as e:
+                print(f"Error in extraction main loop: {e}")
+        else:
+            print("Browser initialization failed after all retry attempts. Extraction worker stopped.")
 
-        except Exception as e:
-            print(f"Browser initialization error: {e}")
-            egz.browser_ready.set()  # Set even on error to prevent hanging
-
-    def run_async_worker():
-        """Wrapper to run async worker in its own event loop"""
-        asyncio.run(extraction_worker())
-    
     try:
-        app = None
-        # Create Qt application first
         print("Creating Qt application...")
         app = QApplication(sys.argv)
         
-        # Set up logging capture
         setup_logging()
-        
-        # Set up cross-module logging for extraction.py
         egz.set_log_emitter(log_emitter)
         
-        # Start extraction worker in background with proper async handling
+        def run_async_worker():
+            """Wrapper to run async worker in its own event loop"""
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(extraction_worker())
+            except Exception as e:
+                print(f"Error in async worker: {e}")
+                egz.browser_ready.set()
+            finally:
+                try:
+                    loop.close()
+                except:
+                    pass
+        
         extraction_thread = Thread(target=run_async_worker, daemon=True)
         extraction_thread.start()
         
         print("Initializing browser in background...")
-        # Create window immediately, it will update when browser is ready
-        window = HomePage([], [], Keywords=[])  # Start with empty lists
-        window.start_button.setEnabled(False)  # Disable start button until browser is ready
+        window = HomePage([], [], Keywords=[])
+        window.start_button.setEnabled(False)
+        window.file_tog.setEnabled(False)
+        window.setWindowTitle("DICV Monitor - Initializing...")
         window.show()
-          # Check browser readiness with timer (non-blocking)
+        
         def check_browser_ready():
             global window
+            
+            if hasattr(check_browser_ready, 'initialized') and check_browser_ready.initialized:
+                return
+            
+            if not hasattr(check_browser_ready, 'timeout_counter'):
+                check_browser_ready.timeout_counter = 0
+            
+            check_browser_ready.timeout_counter += 1
+            max_timeout = 60
+            
+            if check_browser_ready.timeout_counter > max_timeout:
+                print("Browser initialization timeout! Enabling UI with defaults.")
+                check_browser_ready.initialized = True
+                browser_timer.stop()
+                # Switch from progress widget to sections
+                window.progress_widget.setVisible(False)
+                window.start_button.setVisible(False)
+                window.file_tog.setVisible(False)
+                window.setWindowTitle("DICV Monitor")
+                window.start_button.setEnabled(True)
+                window.file_tog.setEnabled(True)
+                QMessageBox.warning(window, "Browser Initialization", 
+                                  "Browser initialization timed out. Kindly close the application and try again.")
+                return
+                
             if egz.browser_ready.is_set():
                 print("Browser initialization completed!")
-                
-                # Update ministries and keywords now that browser is ready
-                ministries_list = list(egz.valdict.values())
-                print(f"Found {len(ministries_list)} ministries")
-                print(f"Keywords: {[i[0] for i in egz.kwList]}")
-                
-                if ministries_list:
-                    # Update the window with real data
-                    new_window = HomePage([egz.valdict[i] for i in egz.mList_input], ministries_list, Keywords=[i for i in egz.kwList])
-                    new_window.show()
-                    window.close()  # Close the temporary window
-                    window = new_window
-                else:
-                    print("WARNING: No ministries found! Browser may not be fully initialized.")
-                
+                check_browser_ready.initialized = True
                 browser_timer.stop()
+                
+                try:
+                    ministries_list = list(egz.valdict.values()) if hasattr(egz, 'valdict') else []
+                    print(f"Found {len(ministries_list)} ministries")
+                    
+                    if hasattr(egz, 'kwList'):
+                        print(f"Keywords: {[i[0] for i in egz.kwList]}")
+                    
+                    if ministries_list and len(ministries_list) > 1:
+                        default_domains = [egz.valdict[i] for i in egz.mList_input] if hasattr(egz, 'mList_input') else []
+                        default_keywords = [i for i in egz.kwList] if hasattr(egz, 'kwList') else []
+                        
+                        new_window = HomePage(default_domains, ministries_list, Keywords=default_keywords)
+                        new_window.setWindowTitle("DICV Monitor")
+                        new_window.show()
+                        window.close()
+                        window = new_window
+                    else:
+                        print("WARNING: Insufficient ministries found! Using defaults.")
+                        # Switch from progress widget to sections
+                        window.progress_widget.setVisible(False)
+                        window.section1.setVisible(True)
+                        window.section2.setVisible(True)
+                        window.setWindowTitle("DICV Monitor")
+                        window.start_button.setEnabled(True)
+                        window.file_tog.setEnabled(True)
+                        QMessageBox.warning(window, "Browser Initialization", 
+                                          "Browser initialized but ministry data is incomplete. Using defaults.")
+                        
+                except Exception as e:
+                    print(f"Error updating window: {e}")
+                    # Switch from progress widget to sections even on error
+                    window.progress_widget.setVisible(False)
+                    window.section1.setVisible(True)
+                    window.section2.setVisible(True)
+                    window.setWindowTitle("DICV Monitor")
+                    window.start_button.setEnabled(True)
+                    window.file_tog.setEnabled(True)
+                    QMessageBox.warning(window, "Browser Initialization", 
+                                      f"Error loading browser data: {e}\nUsing defaults.")
             else:
-                print("Still initializing browser...")
+                dots = "." * (check_browser_ready.timeout_counter % 4)
+                progress_text = f"Initializing browser{dots} ({check_browser_ready.timeout_counter}s)"
+                window.setWindowTitle(f"DICV Monitor - {progress_text}")
         
-        # Timer to check browser readiness every second
+        check_browser_ready.initialized = False
+        check_browser_ready.timeout_counter = 0
+        
         browser_timer = QTimer()
         browser_timer.timeout.connect(check_browser_ready)
-        browser_timer.start(1000)  # Check every second
+        browser_timer.start(1000)
         
         print("Starting Qt event loop...")
-        # Run Qt application (this blocks until app closes)
         sys.exit(app.exec())
 
     except KeyboardInterrupt:
@@ -660,5 +953,4 @@ if __name__ == "__main__": # Signal when browser is initialized
         import traceback
         traceback.print_exc()
     finally:
-        # Restore logging on exit
         restore_logging()
