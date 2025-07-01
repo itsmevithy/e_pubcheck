@@ -1,4 +1,36 @@
+# Current ignores
 files/
+dist/
 bak/
+*.pyc
+build/
+src/bak/
+src/dist/
+src/files/
 src/__pycache__/
-src/*.pyc
+src/dtale_app/
+*exe
+
+# Additional patterns for your specific backup files
+*.md.bak
+*_COMPLETE.md
+*_SUMMARY.md
+*_FIX_*.md
+PDF_VIEWER_*.md
+
+# Build scripts and tests
+src/bak/*.bat
+src/bak/test_*.py
+src/bak/playwright_installer.py
+
+# Framework-specific backups
+src/bak/flask_app/
+src/bak/cpp_gui/
+src/bak/hooks/
+
+# Build artifacts
+*.spec
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.pro.user*
